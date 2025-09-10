@@ -1,0 +1,145 @@
+# Deploy to Azure Kubernetes Service using Azure Yaml Pipeline
+# Build and push image to Azure Container Registry; Deploy to Azure Kubernetes Service
+# https://docs.microsoft.com/azure/devops/pipelines/languages/docker
+
+name: $(Build.DefinitionName)_$(date:yyyy).$(date:MM).$(date:dd)$(rev:.r)
+
+trigger:
+- main
+
+resources:
+- repo: self
+
+variables:
+  aksServiceConnection: 'boardgame-aks'
+  dockerRegistryServiceConnection: 'fcc461ab-4b22-42aa-9625-346cadbfe927'
+  imageRepository: 'boardgame'
+  containerRegistry: 'k8swshopacr.azurecr.io'
+  dockerfilePath: '**/Dockerfile'
+  tag: '$(Build.BuildId)'
+  MAVEN_OPTS: '-Dmaven.repo.local=$(Pipeline.Workspace)/.m2/repository'
+
+  # Agent VM image name
+  vmImageName: 'ubuntu-latest'
+
+
+stages:
+- stage: BuildAndPublish
+  displayName: Build Stage
+  jobs:
+  - job: Build
+    displayName: Build
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: JavaToolInstaller@0
+      inputs:
+        versionSpec: '21'
+        jdkArchitectureOption: 'x64'
+        jdkSourceOption: 'PreInstalled'
+
+    - task: SonarCloudPrepare@3
+      displayName: Prepare SonarCloud Analysis
+      inputs:
+        SonarCloud: 'SonarCloudAnalysis-intimetecPoc'
+        organization: 'testpoc-org'
+        projectKey: 'testpoc-org_board-game'
+        projectName: 'Board Game'
+
+    - task: Bash@3
+      displayName: 'Create Maven settings.xml'
+      inputs:
+        targetType: 'inline'
+        script: |
+          mkdir -p ~/.m2
+          cat <<EOF > ~/.m2/settings.xml
+          <settings>
+            <servers>
+              <server>
+                <id>BoardGame-artifacts</id>
+                <username>AzureDevOps</username>
+                <password>${AZURE_ARTIFACTS_PAT}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+      env:
+        AZURE_ARTIFACTS_PAT: $(AzureArtifacts-Maven)
+
+    - task: Maven@4
+      displayName: 'Maven Build & Test'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'clean install'
+        options: '$(MAVEN_OPTS)'
+        mavenVersionOption: 'Default'
+        publishJUnitResults: true
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
+
+    - task: Maven@4
+      displayName: 'Verify Code Coverage'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'verify sonar:sonar'
+        options: '$(MAVEN_OPTS)'
+
+    - task: SonarCloudPublish@3
+      displayName: Publish SonarCloud Results
+      inputs:
+        pollingTimeoutSec: '300'
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish JAR Artifact'
+      inputs:
+        PathtoPublish: 'target'
+
+    - task: Maven@4
+      displayName: 'Publish to Azure Artifacts Feed'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'deploy'
+        options: '$(MAVEN_OPTS)'
+        mavenAuthenticateFeed: true
+
+        
+    - task: Docker@2
+      displayName: Push image to ACR
+      inputs:
+        command: buildAndPush
+        repository: $(imageRepository)
+        dockerfile: $(dockerfilePath)
+        containerRegistry: $(dockerRegistryServiceConnection)
+        tags: |
+          $(tag)
+          latest
+
+    - upload: manifests
+      artifact: manifests
+
+- stage: Deploy
+  displayName: Deploy stage
+  dependsOn: BuildAndPublish
+
+  jobs:
+  - deployment: DeployToAKS
+    displayName: Deploy to AKS
+    pool:
+      vmImage: $(vmImageName)
+    environment: 'BoardGame.default'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: manifests
+
+          - task: KubernetesManifest@1
+            displayName: Deploy to K8s cluster
+            inputs:
+              action: deploy
+              kubernetesServiceConnection: $(aksServiceConnection)
+              manifests: |
+                $(Pipeline.Workspace)/manifests/deployment.yml
+                $(Pipeline.Workspace)/manifests/service.yml
+              containers: |
+                $(containerRegistry)/$(imageRepository):$(tag)
