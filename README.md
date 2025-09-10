@@ -99,14 +99,16 @@ graph TD
 
 ## 📦 Project Structure
 
+```
 ├── src/
 │   └── main/java/...       # Source code
 │   └── test/java/...       # Unit tests
 ├── pom.xml                 # Maven config
-├── Dockerfile              # (To be added)
-├── manifests/              # Kubernetes deployment YAMLs (To be added)
-├── azure-pipelines.yml     # (To be added)
+├── Dockerfile              # Containerize the project
+├── manifests/              # Kubernetes deployment YAMLs
+├── azure-pipelines.yml     # CI/CD
 └── README.md               # This file
+```
 
 ---
 
